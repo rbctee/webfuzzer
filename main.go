@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -21,6 +22,7 @@ const (
 	ERR_CREATE_HTTP_REQ = 5
 	ERR_SEND_HTTP_REQ   = 6
 	ERR_READ_HTTP_RESP  = 7
+	ERR_CONVERT_INT     = 8
 )
 
 var (
@@ -124,7 +126,7 @@ func main() {
 	// url := flag.String("url", "", "URL with FUZZ keywords. Examples:\n\thttp://example.com/FUZZ\n\thttp://example.com/search?key=FUZZ\n\thttp://example.com/admin.php?FUZZ=FUZZ2")
 	url := flag.String("url", "", "URL with FUZZ keywords. Examples:\n\thttp://example.com/FUZZ")
 	httpMethod := flag.String("method", "GET", "HTTP Method")
-	excludeSize := flag.Int("exclude-size", -1, "Exclude HTTP responses with this size")
+	excludeSize := flag.String("exclude-size", "-1", "Exclude HTTP responses with this size. You can use multiple values separated by commas")
 	excludeLines := flag.Int("exclude-lines", -1, "Exclude HTTP responses with this num. of lines")
 	excludeRegex := flag.String("exclude-regex", "", "Exclude HTTP responses including this regex")
 
@@ -209,8 +211,17 @@ func main() {
 		}
 
 		showResp := true
-		if *excludeSize == numChars {
-			showResp = false
+		for _, v := range strings.Split(*excludeSize, ",") {
+			excludedSize, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				ErrorLog.Printf("Conversion error: %s\n", err)
+				os.Exit(ERR_CONVERT_INT)
+			} else {
+				if int(excludedSize) == numChars {
+					showResp = false
+					break
+				}
+			}
 		}
 
 		if *excludeLines == numLines {

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -37,7 +36,7 @@ func main() {
 	url := flag.String("url", "", "URL with FUZZ keywords. Examples:\n\thttp://example.com/FUZZ")
 	httpMethod := flag.String("method", "GET", "HTTP Method")
 	excludeSize := flag.Int("exclude-size", -1, "Exclude HTTP responses with this size")
-	// excludeLines := flag.Int("exclude-lines", -1, "Exclude HTTP responses with this num. of lines")
+	excludeLines := flag.Int("exclude-lines", -1, "Exclude HTTP responses with this num. of lines")
 	// excludeRegex := flag.Int("exclude-regex", -1, "Exclude HTTP responses including this regex")
 
 	flag.Parse()
@@ -99,19 +98,27 @@ func main() {
 			os.Exit(ERR_SEND_HTTP_REQ)
 		}
 
-		respBody, err := io.ReadAll(res.Body)
-		if err != nil {
-			ErrorLog.Printf("Failed to read HTTP response body: %s\n", err)
-			os.Exit(ERR_READ_HTTP_RESP)
+		var respLines []string
+		scanner := bufio.NewScanner(res.Body)
+
+		for scanner.Scan() {
+			respLines = append(respLines, scanner.Text())
+		}
+		if scanner.Err() != nil {
+			ErrorLog.Printf("Error reading file\n\t%s\n", scanner.Err())
 		}
 
 		showResp := true
-		if *excludeSize == len(respBody) {
+		if *excludeSize == int(res.ContentLength) {
+			showResp = false
+		}
+
+		if *excludeLines == len(respLines) {
 			showResp = false
 		}
 
 		if showResp {
-			fmt.Printf("%s\t\t\t%d\n", v, len(respBody))
+			fmt.Printf("%s\t\t\t%d\t%d\n", v, res.ContentLength, len(respLines))
 		}
 	}
 }

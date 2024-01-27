@@ -2,11 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -26,6 +29,92 @@ var (
 	ErrorLog   *log.Logger
 )
 
+func getStats(r io.Reader) (numChars int, numLines int, err error) {
+	bufSize := 32 * 1024
+	buf := make([]byte, bufSize)
+
+	lineSep := []byte{'\n'}
+
+	numChars = 0
+	numLines = 0
+
+	for {
+		c, err := r.Read(buf)
+		numChars += c
+		numLines += bytes.Count(buf[:c], lineSep)
+
+		switch {
+		case err == io.EOF:
+			return numChars, numLines, nil
+
+		case err != nil:
+			return numChars, numLines, err
+		}
+	}
+}
+
+// Presume that the regex does NOT span over 2 kilobytes
+func searchRegex(excludeRegex string, r io.Reader) (foundMatch bool, numChars int, numLines int, err error) {
+	bufSize := 32 * 1024
+	buf := make([]byte, bufSize)
+	rollingBufSize := 4096
+	var rollingBuf bytes.Buffer
+
+	lineSep := []byte{'\n'}
+
+	foundMatch = false
+	numChars = 0
+	numLines = 0
+
+	regex := regexp.MustCompile(excludeRegex)
+
+	for {
+		c, err := r.Read(buf)
+		numChars += c
+		numLines += bytes.Count(buf[:c], lineSep)
+
+		if c <= bufSize {
+			if regex.FindIndex(buf) != nil {
+				foundMatch = true
+			}
+
+			return foundMatch, numChars, numLines, nil
+		}
+
+		if rollingBuf.Len() == rollingBufSize {
+			rollingBuf.Reset()
+		} else if rollingBuf.Len() == 0 {
+			startIndex := c - (rollingBufSize / 2)
+			rollingBuf.Write(buf[startIndex:])
+		} else if rollingBuf.Len() == (rollingBufSize / 2) {
+			endIndex := c - 1
+			if c >= (rollingBufSize / 2) {
+				endIndex = (rollingBufSize / 2) - 1
+			}
+
+			rollingBuf.Write(buf[:endIndex])
+		}
+
+		if rollingBuf.Len() == rollingBufSize {
+			if regex.FindIndex(buf) != nil {
+				foundMatch = true
+			}
+
+			if c < bufSize {
+				return foundMatch, numChars, numLines, nil
+			}
+
+			switch {
+			case err == io.EOF:
+				return foundMatch, numChars, numLines, nil
+
+			case err != nil:
+				return foundMatch, numChars, numLines, err
+			}
+		}
+	}
+}
+
 func main() {
 	InfoLog = log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime)
 	WarningLog = log.New(os.Stdout, "WARNING: ", log.Ldate|log.Ltime)
@@ -37,7 +126,7 @@ func main() {
 	httpMethod := flag.String("method", "GET", "HTTP Method")
 	excludeSize := flag.Int("exclude-size", -1, "Exclude HTTP responses with this size")
 	excludeLines := flag.Int("exclude-lines", -1, "Exclude HTTP responses with this num. of lines")
-	// excludeRegex := flag.Int("exclude-regex", -1, "Exclude HTTP responses including this regex")
+	excludeRegex := flag.String("exclude-regex", "", "Exclude HTTP responses including this regex")
 
 	flag.Parse()
 
@@ -54,6 +143,13 @@ func main() {
 	} else if !strings.Contains(*url, "FUZZ") {
 		WarningLog.Printf("URL is missing FUZZ keyword")
 		os.Exit(MISSING_FUZZ)
+	}
+
+	if *excludeRegex != "" {
+		_, err := regexp.Compile(*excludeRegex)
+		if err != nil {
+			ErrorLog.Printf("Invalid regex: %s\n", err)
+		}
 	}
 
 	serverURL := *url
@@ -83,6 +179,7 @@ func main() {
 	   Iterate through the wordlist lines and send HTTP requests
 	*/
 
+	fmt.Printf("Word\t\t\tSize\tLines\n")
 	for _, v := range lines {
 		newURL := strings.ReplaceAll(serverURL, "FUZZ", v)
 
@@ -92,33 +189,40 @@ func main() {
 			os.Exit(ERR_CREATE_HTTP_REQ)
 		}
 
-		res, err := http.DefaultClient.Do(req)
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			ErrorLog.Printf("Failed to send HTTP request: %s\n", err)
 			os.Exit(ERR_SEND_HTTP_REQ)
 		}
 
-		var respLines []string
-		scanner := bufio.NewScanner(res.Body)
-
-		for scanner.Scan() {
-			respLines = append(respLines, scanner.Text())
+		numChars := -1
+		numLines := -1
+		foundMatch := false
+		if *excludeRegex != "" {
+			foundMatch, numChars, numLines, err = searchRegex(*excludeRegex, resp.Body)
+		} else {
+			numChars, numLines, err = getStats(resp.Body)
 		}
-		if scanner.Err() != nil {
-			ErrorLog.Printf("Error reading file\n\t%s\n", scanner.Err())
+
+		if err != nil {
+			ErrorLog.Printf("Error while analyzing HTTP response body. Error:\n\t%s\n", err)
 		}
 
 		showResp := true
-		if *excludeSize == int(res.ContentLength) {
+		if *excludeSize == numChars {
 			showResp = false
 		}
 
-		if *excludeLines == len(respLines) {
+		if *excludeLines == numLines {
+			showResp = false
+		}
+
+		if foundMatch {
 			showResp = false
 		}
 
 		if showResp {
-			fmt.Printf("%s\t\t\t%d\t%d\n", v, res.ContentLength, len(respLines))
+			fmt.Printf("%s\t\t\t%d\t%d\n", v, numChars, numLines)
 		}
 	}
 }
